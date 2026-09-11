@@ -17,6 +17,13 @@ pub(crate) fn cmd_import(store: &mut BlogData, path: &Path) -> anyhow::Result<()
         anyhow::bail!("no feeds found in {}", path.display());
     }
 
+    if let Some(url) = urls.iter().find(|url| url.starts_with("stdin:")) {
+        anyhow::bail!(
+            "{url} is an ingest-only feed and cannot be imported; \
+             pipe its RSS/Atom into `blog feed ingest` instead"
+        );
+    }
+
     store.transact(&format!("import {} feeds from OPML", urls.len()), |tx| {
         for url in &urls {
             cmd_add(tx, url)?;
@@ -35,8 +42,8 @@ fn parse_opml_urls(xml: &str) -> Vec<String> {
 
     loop {
         match reader.read_event() {
-            Ok(Event::Empty(ref e) | Event::Start(ref e)) if e.name().as_ref() == b"outline" => {
-                if let Some(url) = extract_xml_url(e, reader.decoder()) {
+            Ok(Event::Empty(ref e) | Event::Start(ref e)) if e.name().as_ref() == "outline" => {
+                if let Some(url) = extract_xml_url(e) {
                     urls.push(url);
                 }
             }
@@ -48,17 +55,12 @@ fn parse_opml_urls(xml: &str) -> Vec<String> {
     urls
 }
 
-fn extract_xml_url(
-    element: &quick_xml::events::BytesStart,
-    decoder: quick_xml::encoding::Decoder,
-) -> Option<String> {
+fn extract_xml_url(element: &quick_xml::events::BytesStart) -> Option<String> {
     let attr = element
         .attributes()
         .flatten()
-        .find(|a| a.key.as_ref() == b"xmlUrl")?;
-    let value = attr
-        .decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder)
-        .ok()?;
+        .find(|a| a.key.as_ref() == "xmlUrl")?;
+    let value = attr.normalized_value(XmlVersion::Implicit1_0).ok()?;
     let url = value.trim().to_string();
     (!url.is_empty()).then_some(url)
 }

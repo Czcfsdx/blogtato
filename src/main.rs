@@ -17,6 +17,9 @@ use shorthand::RESERVED_COMMANDS;
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
+    /// Use compact output (less whitespace between groups)
+    #[arg(long)]
+    compact: bool,
 }
 
 const QUERY_HELP: &str = "\
@@ -140,6 +143,11 @@ enum FeedCommand {
         /// The feed URL to subscribe to
         urls: Vec<String>,
     },
+    /// Ingest RSS/Atom XML from stdin into a feed by name. Stored as stdin:<name>.
+    Ingest {
+        /// Stable feed name. Stored as stdin:<name>.
+        name: String,
+    },
     /// Unsubscribe from a feed by URL or @shorthand
     Rm {
         /// The feed URL or @shorthand to unsubscribe from
@@ -217,12 +225,23 @@ fn run() -> anyhow::Result<()> {
     let mut store = data::BlogData::open(&store_dir)?;
     data::check_schema_version(&mut store)?;
 
+    let compact = args.compact
+        || match data::get_config_value(&store, "compact").as_deref() {
+            None => false,
+            Some("true") => true,
+            Some("false") => false,
+            Some(other) => {
+                anyhow::bail!(
+                    "invalid value for config key 'compact': '{other}' (expected 'true' or 'false')"
+                )
+            }
+        };
     match args.command {
         // Commands that accept a query/filter
         Some(Command::Show { ref args }) => {
             let all_args: Vec<String> = filter.into_iter().chain(args.iter().cloned()).collect();
             let (q, query_text) = parse_query_or_default(&all_args, &store)?;
-            commands::show::cmd_show(&store, &q, &query_text)?;
+            commands::show::cmd_show(&store, &q, &query_text, compact)?;
         }
         Some(Command::Export { ref args }) => {
             let all_args: Vec<String> = filter.into_iter().chain(args.iter().cloned()).collect();
@@ -243,7 +262,7 @@ fn run() -> anyhow::Result<()> {
         }
         None => {
             let (q, query_text) = parse_query_or_default(&filter, &store)?;
-            commands::show::cmd_show(&store, &q, &query_text)?;
+            commands::show::cmd_show(&store, &q, &query_text, compact)?;
         }
 
         // Commands that reject filters
@@ -262,6 +281,19 @@ fn run() -> anyhow::Result<()> {
                 eprintln!("Added {resolved}");
             }
             eprintln!("Run `blog sync` to fetch posts.");
+        }
+        Some(Command::Feed {
+            command: FeedCommand::Ingest { ref name },
+        }) => {
+            reject_filter(&filter, "feed")?;
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut bytes)?;
+            let ingest_filter = data::get_config_value(&store, "ingest_filter");
+            let added = store.transact(&format!("ingest feed: {name}"), |tx| {
+                commands::ingest::cmd_ingest(tx, name, &bytes, ingest_filter.as_deref())
+            })?;
+            eprintln!("Ingested {added}");
+            eprintln!("Run `blog sync` to sync this feed to your other devices.");
         }
         Some(Command::Feed {
             command: FeedCommand::Rm { ref urls },
